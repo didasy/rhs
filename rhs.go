@@ -244,7 +244,7 @@ func (b *ENC) DecryptRSA(encrypted, s, nonce []byte, pub *rsa.PublicKey) ([]byte
 	return msg, nil
 }
 
-// Encrypt data using bcrypt -> ECDSA-AES256GCM-AEAD to be stored
+// Encrypt data using scrypt -> ECDSA-AES256GCM-AEAD to be stored
 // returns encrypted, r, s, and nonce. Preferably store them each in different databases (or machines) if you can
 func (b *ENC) EncryptECDSAStore(data, salt []byte, pk *ecdsa.PrivateKey) ([]byte, []byte, []byte, []byte, error) {
 	// First hash with scrypt
@@ -270,7 +270,7 @@ func (b *ENC) EncryptECDSAStore(data, salt []byte, pk *ecdsa.PrivateKey) ([]byte
 	return encrypted, r.Bytes(), s.Bytes(), nonce, nil
 }
 
-// Encrypt data using bcrypt -> RSA-AES256GCM-AEAD to be stored
+// Encrypt data using scrypt -> RSA-AES256GCM-AEAD to be stored
 // returns encrypted, sign, and nonce. Preferably store them each in different databases (or machines) if you can
 func (b *ENC) EncryptRSAStore(data, salt []byte, pk *rsa.PrivateKey) ([]byte, []byte, []byte, error) {
 	// First hash with scrypt
