@@ -1,6 +1,7 @@
 # rhs
 ### Headache free encryption suite for golang
 ----------------------------------------------
+[![GoDoc](https://godoc.org/github.com/JesusIslam/rhs?status.svg)](https://godoc.org/github.com/JesusIslam/rhs)
 
 ### What?
 You want to send encrypted message or saving password into your database without having to bother to understand about how they works? Then this package is for you.
