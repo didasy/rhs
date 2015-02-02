@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"errors"
 	"github.com/JesusIslam/rhs"
 )
 
@@ -50,4 +51,31 @@ func main() {
 		panic(err)
 	}
 	fmt.Println("ECDSA OK")
+	ser, err := rhs.NewNACL()
+	if err != nil {
+		panic(err)
+	}
+	cli, err := rhs.NewNACL()
+	if err != nil {
+		panic(err)
+	}
+	enc, mh, n, err := ser.Encrypt(password, &cli.Pub)
+	if err != nil {
+		panic(err)
+	}
+	_, ok := cli.Decrypt(enc, mh, &n, &ser.Pub)
+	if ok == false {
+		panic(errors.New("FAILED TO DECRYPT"))
+	}
+	ser.GenSharedKey(&cli.Pub)
+	cli.GenSharedKey(&ser.Pub)
+	enc, mh, n, err = ser.EncryptSK(password)
+	if err != nil {
+		panic(err)
+	}
+	_, ok = cli.DecryptSK(enc, mh, &n)
+	if ok == false {
+		panic(errors.New("FAILED TO DECRYPT USING SK"))
+	}
+	fmt.Println("NACL OK")
 }
