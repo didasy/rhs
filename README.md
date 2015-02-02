@@ -10,7 +10,11 @@ You want to send encrypted message or saving password into your database without
 `go get github.com/JesusIslam/rhs`
 
 ### Dependencies
-`go get golang.org/x/crypto/scrypt`
+```
+go get golang.org/x/crypto/poly1305
+go get golang.org/x/crypto/nacl
+go get golang.org/x/crypto/scrypt
+```
 
 ### Usage
 
