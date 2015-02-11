@@ -13,15 +13,16 @@ import (
 	"crypto/ecdsa"
 	"crypto/cipher"
 	"crypto/subtle"
+	"crypto/sha256"
 	"crypto/sha512"
+	"github.com/agl/ed25519"
 	"golang.org/x/crypto/scrypt"
-	"golang.org/x/crypto/poly1305"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/crypto/nacl/secretbox"
 )
 
 const (
-	VERSION = "0.0.2"
+	VERSION = "0.0.3"
 )
 
 // AES key, length must be 32 bytes to use AES256
@@ -147,7 +148,7 @@ func LoadPubECDSA(path string) (*ecdsa.PublicKey, error) {
 		return nil, err
 	}
 	pub, ok := key.(*ecdsa.PublicKey)
-	if !ok {
+	if ok == false {
 		return nil, errors.New("Not an ECDSA public key")
 	}
 	return pub, nil
@@ -173,15 +174,16 @@ func LoadPubRSA(path string) (*rsa.PublicKey, error) {
 		return nil, err
 	}
 	pub, ok := key.(*rsa.PublicKey)
-	if !ok {
+	if ok == false {
 		return nil, errors.New("Not an RSA public key")
 	}
 	return pub, nil
 }
 
-// Encrypt AES key to be sent to client using RSA, use this only once per connection. pub is client's (or us if we are the client) public key.
+// These two functions are created to support PGP style encryption
+// Encrypt AES key to be sent to client using RSA. pub is client's (or us if we are the client) public key.
 // You preferably should use SetKey() first before using this, because this function get the key to be encrypted from package's KEY variable
-// For JS, see https://github.com/travist/jsencrypt (Ensure this lib is using OAEP, otherwise we use PKCS1v15)
+// For JS, see https://github.com/travist/jsencrypt (The lib is using PKCS1)
 // Returns encrypted key
 func ExchangeAESKeyRSAEncrypt(oaep bool, label []byte, hasher *hash.Hash, pub *rsa.PublicKey) ([]byte, error) {
 	var encrypted []byte
@@ -217,6 +219,122 @@ func ExchangeAESKeyRSADecrypt(oaep bool, encrypted, label []byte, hasher *hash.H
 		}
 	}
 	return nil
+}
+
+// These PGPStyle* functions purposefully created for secure messaging from Go server to JS clients PGP style
+// But you should not ever consider using it, at least for now
+// create a pair of bit RSA keypair in PEM format
+// Returns client pk, server pk, client pub, and server pub
+func PGPStyleCreateKeypairs(bit int) ([]byte, []byte, []byte, []byte, error) {
+	c, err := rsa.GenerateKey(rand.Reader, bit)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	s, err := rsa.GenerateKey(rand.Reader, bit)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	dcpk := x509.MarshalPKCS1PrivateKey(c)
+	dspk := x509.MarshalPKCS1PrivateKey(s)
+	dcpub, err := x509.MarshalPKIXPublicKey(c.Public())
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	dspub, err := x509.MarshalPKIXPublicKey(s.Public())
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	cpkb := &pem.Block{"RSA PRIVATE KEY", nil, dcpk}
+	spkb := &pem.Block{"RSA PRIVATE KEY", nil, dspk}
+	cpubb := &pem.Block{"PUBLIC KEY", nil, dcpub}
+	spubb := &pem.Block{"PUBLIC KEY", nil, dspub}
+	cpk := pem.EncodeToMemory(cpkb)
+	spk := pem.EncodeToMemory(spkb)
+	cpub := pem.EncodeToMemory(cpubb)
+	spub := pem.EncodeToMemory(spubb)
+	return cpk, spk, cpub, spub, nil
+}
+
+// Load key in PEM format and return as *rsa.PrivateKey
+func PGPStyleLoadPrivateKey(pemPk []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemPk)
+	if block.Type != "RSA PRIVATE KEY" {
+		return nil, errors.New("Unknown key type")
+	}
+	return x509.ParsePKCS1PrivateKey(block.Bytes)
+}
+
+// Load key in PEM format and return as *rsa.PublicKey
+func PGPStyleLoadPublicKey(pemPub []byte) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode(pemPub)
+	if block.Type != "PUBLIC KEY" {
+		return nil, errors.New("Unknown key type")
+	}
+	pubKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	pub, ok := pubKey.(*rsa.PublicKey)
+	if ok == false {
+		return nil, errors.New("Not an RSA public key")
+	}
+	return pub, nil
+}
+
+// Returns encrypted message, hash, nonce, additionalData, and encrypted key
+func PGPStyleEncrypt(data []byte, pub *rsa.PublicKey) ([]byte, []byte, []byte, []byte, []byte, error) {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	_, err = rand.Read(nonce)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	additionalData := make([]byte, 32)
+	_, err = rand.Read(additionalData)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	encrypted := gcm.Seal(nil, nonce, data, additionalData)
+	h := sha256.Sum256(encrypted)
+	encKey, err := rsa.EncryptPKCS1v15(rand.Reader, pub, key)
+	if err != nil {
+		return []byte{}, []byte{}, []byte{}, []byte{}, []byte{}, err
+	}
+	return encrypted, h[:], nonce, additionalData, encKey, nil
+}
+
+// Returns decrypted message
+func PGPStyleDecrypt(encrypted, h, nonce, additionalData, ekey []byte, pk *rsa.PrivateKey) ([]byte, error) {
+	rh := sha256.Sum256(encrypted)
+	if subtle.ConstantTimeCompare(h, rh[:]) != 1 {
+		return []byte{}, errors.New("Failed to verify hash")
+	}
+	key := make([]byte, 32)
+	err := rsa.DecryptPKCS1v15SessionKey(rand.Reader, pk, ekey, key)
+	if err != nil {
+		return []byte{}, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return []byte{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return []byte{}, err
+	}
+	return gcm.Open(nil, nonce, encrypted, additionalData)
 }
 
 // Encrypt data to be send using ECDSA-AES256GCM-AEAD
@@ -268,7 +386,7 @@ func (b *ENC) DecryptECDSA(encrypted, rb, sb, nonce []byte, pub *ecdsa.PublicKey
 	s.SetBytes(sb)
 	// First we verify the content
 	ok := ecdsa.Verify(pub, encrypted, r, s)
-	if !ok {
+	if ok == false {
 		return []byte{}, errors.New("Failed to verify content")
 	}
 	// then we open the msg
@@ -357,7 +475,7 @@ func (b *ENC) ValidateECDSA(password, salt, encrypted, rb, sb, nonce []byte, pub
 	s.SetBytes(sb)
 	// First we verify the content
 	ok := ecdsa.Verify(pub, encrypted, r, s)
-	if !ok {
+	if ok == false {
 		return errors.New("Failed to verify content")
 	}
 
@@ -409,7 +527,6 @@ type NACL struct {
 	Pub [32]byte
 	Priv [32]byte
 	SK [32]byte
-	hasher hash.Hash
 }
 
 // Create new NACL struct
@@ -418,39 +535,43 @@ func NewNACL() (*NACL, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &NACL{*pub, *priv, [32]byte{}, sha512.New()}, nil
+	return &NACL{*pub, *priv, [32]byte{}}, nil
 }
 
-// Encrypt data to be stored using NaCL-Poly1305, be sure to do SetKey() beforehand.
+// Returns 32 byte pub and 64 byte pk for EdDSA (Ed25519)
+func GenEdDSAKeyPair() ([32]byte, [64]byte, error) {
+	pub, pk, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return [32]byte{}, [64]byte{}, err
+	}
+	return *pub, *pk, err
+}
+
+// Encrypt data to be stored using NaCL-EdDSA, be sure to do SetKey() beforehand.
 // Please don't forget to store the salt.
 // Returns encrypted data, signature, and nonce.
-func EncryptNACLStore(data, salt []byte) ([]byte, [16]byte, [24]byte, error) {
+func EncryptNACLStore(data, salt []byte, ecpk [64]byte) ([]byte, [64]byte, [24]byte, error) {
 	var key [32]byte
 	copy(key[:], KEY)
 	non := make([]byte, 24)
 	_, err := rand.Read(non)
 	if err != nil {
-		return []byte{}, [16]byte{}, [24]byte{}, err
+		return []byte{}, [64]byte{}, [24]byte{}, err
 	}
 	var nonce [24]byte
 	copy(nonce[:], non)
 	data, err = scrypt.Key(data, salt, 1 << 14, 8, 1, 32)
 	if err != nil {
-		return []byte{}, [16]byte{}, [24]byte{}, err
+		return []byte{}, [64]byte{}, [24]byte{}, err
 	}
 	data = secretbox.Seal([]byte{}, data, &nonce, &key)
-	var sign [16]byte
-	var s [32]byte
-	copy(s[:], salt)
-	poly1305.Sum(&sign, data, &s)
-	return data, sign, nonce, nil
+	sign := ed25519.Sign(&ecpk, data)
+	return data, *sign, nonce, nil
 }
 
-// Decrypt stored data using NaCL-Poly1305 to be validated.
-func ValidateNACL(password, salt, encrypted []byte, sign [16]byte, nonce [24]byte, key []byte) error {
-	var s [32]byte
-	copy(s[:], salt)
-	if poly1305.Verify(&sign, encrypted, &s) == false {
+// Decrypt stored data using NaCL-EdDSA to be validated.
+func ValidateNACL(password, salt, encrypted []byte, sign [64]byte, nonce [24]byte, pub [32]byte, key []byte) error {
+	if ed25519.Verify(&pub, encrypted, &sign) == false {
 		return errors.New("Failed to verify content")
 	}
 	var k [32]byte
@@ -476,7 +597,7 @@ func (n *NACL) GenSharedKey(ppub *[32]byte) {
 }
 
 // Encrypt the message, returns encrypted data, hash, and nonce
-func (n *NACL) Encrypt(msg []byte, ppub *[32]byte) ([]byte, []byte, [24]byte, error) {
+func (n *NACL) Encrypt(msg, salt []byte, ppub *[32]byte) ([]byte, []byte, [24]byte, error) {
 	non := make([]byte, 24)
 	_, err := rand.Read(non)
 	if err != nil {
@@ -485,19 +606,20 @@ func (n *NACL) Encrypt(msg []byte, ppub *[32]byte) ([]byte, []byte, [24]byte, er
 	var nonce [24]byte
 	copy(nonce[:], non)
 	e := box.Seal([]byte{}, msg, &nonce, ppub, &n.Priv)
-	n.hasher.Write(e)
-	h := n.hasher.Sum(nil)
-	n.hasher.Reset()
-	return e, h, nonce, nil
+	x := append(salt[:16], e...)
+	x = append(x, salt[16:]...)
+	h := sha512.Sum512(x)
+	return e, h[:], nonce, nil
 }
 
 // Decrypt the message, returns decrypted data
-func (n *NACL) Decrypt(encrypted, h []byte, nonce *[24]byte, ppub *[32]byte) ([]byte, bool) {
-	n.hasher.Write(encrypted)
-	if subtle.ConstantTimeCompare(h, n.hasher.Sum(nil)) != 1 {
+func (n *NACL) Decrypt(encrypted, h, salt []byte, nonce *[24]byte, ppub *[32]byte) ([]byte, bool) {
+	x := append(salt[:16], encrypted...)
+	x = append(x, salt[16:]...)
+	rh := sha512.Sum512(x)
+	if subtle.ConstantTimeCompare(h, rh[:]) != 1 {
 		return []byte{}, false
 	}
-	n.hasher.Reset()
 	d, ok := box.Open([]byte{}, encrypted, nonce, ppub, &n.Priv)
 	if ok == false {
 		return []byte{}, ok
@@ -506,7 +628,7 @@ func (n *NACL) Decrypt(encrypted, h []byte, nonce *[24]byte, ppub *[32]byte) ([]
 }
 
 // Encrypt the message using shared key, returns encrypted data, hash, and nonce
-func (n *NACL) EncryptSK(msg []byte) ([]byte, []byte, [24]byte, error) {
+func (n *NACL) EncryptSK(msg, salt []byte) ([]byte, []byte, [24]byte, error) {
 	non := make([]byte, 24)
 	_, err := rand.Read(non)
 	if err != nil {
@@ -515,19 +637,18 @@ func (n *NACL) EncryptSK(msg []byte) ([]byte, []byte, [24]byte, error) {
 	var nonce [24]byte
 	copy(nonce[:], non)
 	e := box.SealAfterPrecomputation([]byte{}, msg, &nonce, &n.SK)
-	n.hasher.Write(e)
-	h := n.hasher.Sum(nil)
-	n.hasher.Reset()
-	return e, h, nonce, nil
+	x := append(e, salt...)
+	h := sha512.Sum512(x)
+	return e, h[:], nonce, nil
 }
 
 // Decrypt the message using shared key, returns decrypted data
-func (n *NACL) DecryptSK(encrypted, h []byte, nonce *[24]byte) ([]byte, bool) {
-	n.hasher.Write(encrypted)
-	if subtle.ConstantTimeCompare(h, n.hasher.Sum(nil)) != 1 {
+func (n *NACL) DecryptSK(encrypted, h, salt []byte, nonce *[24]byte) ([]byte, bool) {
+	x := append(encrypted, salt...)
+	rh := sha512.Sum512(x)
+	if subtle.ConstantTimeCompare(h, rh[:]) != 1 {
 		return []byte{}, false
 	}
-	n.hasher.Reset()
 	d, ok := box.OpenAfterPrecomputation([]byte{}, encrypted, nonce, &n.SK)
 	if ok == false {
 		return []byte{}, ok
